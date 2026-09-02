@@ -23,7 +23,9 @@ import joblib
 import mlflow
 import numpy as np
 import pandas as pd
+from dotenv import load_dotenv
 from lightgbm import LGBMClassifier
+from mlflow.tracking import MlflowClient
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
@@ -43,6 +45,9 @@ from xgboost import XGBClassifier
 from src.features.build_features import load_preprocessor, load_processed_data
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
+
+load_dotenv(PROJECT_DIR / ".env")
+
 MODELS_DIR = PROJECT_DIR / "models"
 REPORTS_DIR = PROJECT_DIR / "reports" / "figures"
 BEST_MODEL_PATH = MODELS_DIR / "best_model.joblib"
@@ -56,6 +61,8 @@ MIN_F1_THRESHOLD = 0.60
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "")
 MLFLOW_EXPERIMENT_NAME = "telco-churn-modeling"
 MLFLOW_LOCAL_URI = f"sqlite:///{PROJECT_DIR / 'mlflow.db'}"
+MLFLOW_REGISTERED_MODEL_NAME = "telco-churn-xgboost"
+MLFLOW_MODEL_STAGE = "Staging"
 
 
 def build_models() -> Dict[str, Tuple[Callable, Dict]]:
@@ -322,7 +329,7 @@ def train_and_evaluate() -> Dict[str, Dict]:
     return results
 
 
-def log_to_mlflow(results: Dict[str, Dict], models: Dict[str, Tuple]) -> None:
+def log_to_mlflow(results: Dict[str, Dict], models: Dict[str, Tuple], best_name: str) -> None:
     """Log parameters, metrics and artifacts of every run to MLflow.
 
     A run is created per fitted model under a configurable experiment. If no
@@ -334,12 +341,16 @@ def log_to_mlflow(results: Dict[str, Dict], models: Dict[str, Tuple]) -> None:
     Args:
         results: Output of :func:`train_and_evaluate` keyed by model name.
         models: Mapping of model name to ``(factory, params)``.
+        best_name: Name of the best performing model (used to select the run
+            to register in the MLflow Model Registry).
     """
     if MLFLOW_TRACKING_URI:
         mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     else:
         mlflow.set_tracking_uri(MLFLOW_LOCAL_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
+
+    best_run_id: str | None = None
 
     for name, res in results.items():
         _, params = models[name]
@@ -351,7 +362,15 @@ def log_to_mlflow(results: Dict[str, Dict], models: Dict[str, Tuple]) -> None:
             cm_path = tmp / "confusion_matrix.csv"
             res["cm"].to_csv(cm_path, index=True)
 
-            with mlflow.start_run(run_name=name):
+            model_dir = tmp / "model"
+            if name == "logistic_regression" or name == "random_forest":
+                mlflow.sklearn.save_model(res["model"], path=str(model_dir))
+            elif name == "xgboost":
+                mlflow.xgboost.save_model(res["model"], path=str(model_dir))
+            elif name == "lightgbm":
+                mlflow.lightgbm.save_model(res["model"], path=str(model_dir))
+
+            with mlflow.start_run(run_name=name) as run:
                 for k, v in params.items():
                     mlflow.log_param(k, v)
                 mlflow.log_param("threshold", res["threshold"])
@@ -362,19 +381,66 @@ def log_to_mlflow(results: Dict[str, Dict], models: Dict[str, Tuple]) -> None:
                 mlflow.log_artifact(str(pr_path))
                 mlflow.log_artifact(str(cm_path))
 
-                if name == "logistic_regression" or name == "random_forest":
-                    mlflow.sklearn.log_model(res["model"], name="model")
-                elif name == "xgboost":
-                    mlflow.xgboost.log_model(res["model"], name="model")
-                elif name == "lightgbm":
-                    mlflow.lightgbm.log_model(res["model"], name="model")
+                mlflow.log_artifacts(str(model_dir), artifact_path="model")
+
+                if name == best_name:
+                    best_run_id = run.info.run_id
+
+    if best_run_id is not None:
+        register_model_in_registry(best_run_id, results[best_name])
+
+
+def register_model_in_registry(run_id: str, best: Dict) -> None:
+    """Register the best model in the MLflow Model Registry.
+
+    The model is registered and transitioned to the configured stage. Only the
+    metrics of the best model are attached as tags/description for traceability.
+
+    Args:
+        run_id: MLflow run id containing the ``model`` artifact.
+        best: Result dict of the best model (see :func:`train_and_evaluate`).
+    """
+    try:
+        model_version = mlflow.register_model(
+            f"runs:/{run_id}/model",
+            MLFLOW_REGISTERED_MODEL_NAME,
+            await_registration_for=300,
+        )
+    except Exception as exc:  # pragma: no cover - depends on backend availability
+        print(f"WARNING: No se pudo registrar el modelo en el Model Registry: {exc}")
+        return
+
+    client = MlflowClient()
+    stage = MLFLOW_MODEL_STAGE
+    client.transition_model_version_stage(
+        name=MLFLOW_REGISTERED_MODEL_NAME,
+        version=model_version.version,
+        stage=stage,
+    )
+    metrics = {k: round(v, 4) for k, v in best["metrics"].items()}
+    description = (
+        f"Mejor modelo ({MLFLOW_REGISTERED_MODEL_NAME.split('-')[-1]}) para Telco Churn. "
+        f"Métricas sobre test: accuracy={metrics['accuracy']}, "
+        f"precision={metrics['precision']}, recall={metrics['recall']}, "
+        f"f1={metrics['f1']}, auc_roc={metrics['auc_roc']}. "
+        f"Umbral óptimo: {best['threshold']:.3f}."
+    )
+    client.update_model_version(
+        name=MLFLOW_REGISTERED_MODEL_NAME,
+        version=model_version.version,
+        description=description,
+    )
+    print(
+        f"Modelo registrado: '{MLFLOW_REGISTERED_MODEL_NAME}' "
+        f"versión {model_version.version} (stage={stage})."
+    )
 
 
 def main() -> None:
     """Run the full training/evaluation flow and persist the best model."""
     results = train_and_evaluate()
     best_name = save_artifacts(results)
-    log_to_mlflow(results, build_models())
+    log_to_mlflow(results, build_models(), best_name)
 
     best_metrics = results[best_name]["metrics"]
     print("\n=== Métricas del mejor modelo sobre TEST ===")
