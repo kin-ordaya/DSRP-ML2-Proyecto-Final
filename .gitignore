@@ -13,6 +13,8 @@ data/external/*
 # MLflow
 mlruns/
 mlartifacts/
+mlflow.db
+*.sqlite
 
 # Python
 __pycache__/
