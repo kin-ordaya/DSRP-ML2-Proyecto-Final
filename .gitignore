@@ -16,6 +16,9 @@ mlartifacts/
 mlflow.db
 *.sqlite
 
+# RAG vector store (generated, do not version)
+models/rag_chroma/
+
 # Python
 __pycache__/
 *.py[cod]
