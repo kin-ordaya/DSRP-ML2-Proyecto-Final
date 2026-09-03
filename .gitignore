@@ -13,6 +13,11 @@ data/external/*
 # MLflow
 mlruns/
 mlartifacts/
+mlflow.db
+*.sqlite
+
+# RAG vector store (generated, do not version)
+models/rag_chroma/
 
 # Python
 __pycache__/

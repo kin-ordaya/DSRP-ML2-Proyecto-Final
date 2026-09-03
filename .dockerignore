@@ -1,0 +1,27 @@
+# Excluye del contexto de build lo que no necesita la imagen
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Datos y artefactos (se montan como volúmenes en compose)
+data/processed/
+data/external/
+models/
+mlruns/
+mlartifacts/
+mlflow.db
+*.sqlite
+reports/
+
+# Sin necesidad en la imagen
+notebooks/
+.git/
+.gitignore
+.env
+Dockerfile
+docker-compose.yml
+README.md
