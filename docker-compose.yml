@@ -1,0 +1,51 @@
+# Reto ML1 - Orquestación del pipeline de ML con Docker Compose.
+#
+# Flujo: preprocess -> train -> predict
+#   - `data/raw` se monta como solo lectura (el CSV crudo lo provee el host).
+#   - Los artefactos generados (data/processed, models, reports/figures) se
+#     montan en el host para poder inspeccionarlos fuera del contenedor.
+#
+# Uso:
+#   docker compose up --build preprocess
+#   docker compose up train
+#   docker compose up predict
+#   (o `docker compose run` para cada servicio)
+
+services:
+  preprocess:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: telco-churn-ml:latest
+    volumes:
+      - ./data/raw:/app/data/raw:ro
+      - ./data/processed:/app/data/processed
+      - ./models:/app/models
+    command: ["python", "-m", "src.features.build_features"]
+
+  train:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: telco-churn-ml:latest
+    depends_on:
+      - preprocess
+    volumes:
+      - ./data/raw:/app/data/raw:ro
+      - ./data/processed:/app/data/processed
+      - ./models:/app/models
+      - ./reports/figures:/app/reports/figures
+    command: ["python", "-m", "src.models.train_model"]
+
+  predict:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: telco-churn-ml:latest
+    depends_on:
+      - train
+    volumes:
+      - ./data/raw:/app/data/raw:ro
+      - ./data/processed:/app/data/processed
+      - ./models:/app/models
+    command: ["python", "-m", "src.models.predict_model"]
